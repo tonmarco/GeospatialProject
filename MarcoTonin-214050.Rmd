@@ -1,0 +1,520 @@
+---
+output: html_document
+---
+
+# Airbnb Prices Analysis in Milan
+
+## Geospatial Analysis and Representation for Data Science
+
+### Marco Tonin - 214050
+
+
+In this file, the focus will be on testing and analysing spatial autocorrelation of the Airbnb prices in Milan. 
+
+In the jupyter notebook, with python, I have analysed data from different data sources, such as data about Milan from *Inside Airbnb* and statistical data, with a csv file retrieved from the city data portal. Moreover, I have retrieved data about tourist activities from OpenStreetMap.
+
+These data were merged and exported in a *.gpkg* file from the jupyter notebook. In this section, I will use this file to analyse spatial autocorrelation. 
+
+The steps to check if there exists a spatial autocorrelation of prices are:
+
+* create of the spatial weight matrices
+  + define spatial neighbors 
+  + define the spatial weight matrices, given the relationships among spatial units
+* compute the Moran's I test of spatial autocorrelation for each spatial weight matrix to see if there exists spatial autocorrelation
+  + without randomisation
+  + with randomisation
+  + with bootstrap
+* plot Moran Scatterplots to check which spatial units contribute more to the spatial autocorrelation 
+* compute the Local Moran's I index to check the statistical significance of the results of the Scatterplot
+
+### Libraries
+```{r, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+#R version 4.0.3 (2020-10-10)
+library(rgdal)     #version ‘1.5.18’
+library(spdep)     #version ‘1.1.5’
+```
+
+### Import data
+```{r}
+#geopackage from the notebook
+neigh <- readOGR('milano.gpkg','neighbourhoods')
+```
+
+### Characteristics of data
+```{r}
+str(neigh@data)
+```
+
+Let's see the shape of our data:
+
+```{r}
+plot(neigh)
+```
+
+### Spatial Weight Matrices
+
+To test the spatial autocorrelation of prices in Milan, I will compute spatial weight matrices with three different criterions:
+
+* K-Nearest Neighbour: with a K equal to 1
+* Contiguity-based Neighbourhood: with the Queen criterion
+* Cut-off neighbourhood: selecting 3 different cut-offs
+
+The distances in the KNN and in the cut-off criterion are computed looking at the distances between the centroids, which can be computed with the function *coordinates()*.
+
+```{r}
+coords <- coordinates(neigh)
+```
+
+#### KNN = 1
+
+
+To build a spatial weight matrix with the *KNN criterion*, it is necessary to find the neighbourhood spatial definition. Then, we can compute the matrix, which we will use later.
+
+```{r}
+#Knn and convert it into a neighbours list of class nb
+knn1 <- knn2nb(knearneigh(coords,k=1,longlat=T))
+
+#crate the spatial weights matrix
+knn1.listw <- nb2listw(knn1,style="W")
+```
+
+And we can look it with a plot:
+
+```{r}
+#plot knn1 with the shape of Milan and links 
+plot(neigh, border="grey")
+title('KNN = 1 criterion')
+plot(knn1, coords, add=TRUE) 
+```
+
+#### Contiguity-based Neighbourhood (Queen)
+
+
+The *contiguity-based neighbourhood criterion* implies that two spatial units are neighbours if they share a common boundary. 
+
+As above, we compute the neighbourhood definition and the spatial weight matrix.
+
+```{r}
+#compute contiguity-based neighbourhood, with Queen criterion.
+contnb_q <- poly2nb(neigh, queen=T)
+
+#create the spatial weights matrix
+contnb_q.listw <- nb2listw(contnb_q,style="W")
+```
+
+And we can see it in a plot:
+
+```{r}
+#plot it as before
+plot(neigh, border="grey")
+title('Contiguity-based criterion')
+plot(contnb_q, coords, add=TRUE)
+```
+
+#### Critical cut-off neighbourhood criterion
+
+
+First, it is important to check what is the minimum distance between the spatial units, with a KNN approach.
+Then, the *critical cut-off neighbourhood criterion* implies that two spatial units are considered as neighbours if their distance is equal, or less than equal, to a certain fixed distance which represents a critical cut-off. 
+
+Therefore, we find the minimum distance, which in our case is about 1.77 km. This is important to permit each spatial units to have at least a neighbour. Since we want at least one neighbour, the *k* value of the KNN is set to 1. 
+
+```{r}
+#as above. Now we want to find the minimum distance.
+knn1 <- knn2nb(knearneigh(coords,k=1,longlat=T))
+all.linkedT <- max(unlist(nbdists(knn1, coords, longlat=T))) 
+all.linkedT  #1.772133
+```
+
+Therefore, the cut-off distance must be greater than 1.772133.
+For this reason, neighbourhood definitions are explained with a set of values greater than the cut-off distance.
+
+```{r}
+#identify neighbours with 3 different cut-off
+dnb18 <- dnearneigh(coords, 0, 1.8, longlat=TRUE)
+dnb25 <- dnearneigh(coords, 0, 2.5, longlat=TRUE) 
+dnb32 <- dnearneigh(coords, 0, 3.2, longlat=TRUE) 
+```
+
+In this way, with different neighbourhood definitions, increasing the cut-off distance, the number of links increases. We can easily see this process plotting the links. Here some examples:
+
+```{r}
+plot(neigh, border="grey", xlab="", ylab="", xlim=NULL)
+title(main="Cut-Off = 1.8km") 
+plot(dnb18, coords, add=TRUE, col="black")
+```
+```{r}
+plot(neigh, border="grey", xlab="", ylab="", xlim=NULL)
+title(main="Cut-Off = 2.5km") 
+plot(dnb25, coords, add=TRUE, col="black")
+```
+```{r}
+plot(neigh, border="grey", xlab="", ylab="", xlim=NULL)
+title(main="Cut-Off = 3.2km") 
+plot(dnb32, coords, add=TRUE, col="black")
+```
+
+Having the neighbourhood definitions, now the next step is to define the Spatial Weights Matrices. 
+
+To do it, it is necessary to create a row-standardized spatial weights matrix for each critical cut-off neighbourhood.
+```{r}
+#create spatial weights matrix for each cut-off distance
+dnb18.listw <- nb2listw(dnb18,style="W")
+dnb25.listw <- nb2listw(dnb25,style="W")
+dnb32.listw <- nb2listw(dnb32,style="W")
+```
+
+### Moran's I test of spatial autocorrelation 
+
+First, we can give a look at the map, to check possible spatial autocorrelation visually. 
+```{r}
+#plot the distribution with airbnb prices divided in quartiles. Then assign to each quartile the colour and plot it in the shape of Milan. 
+brks <- round(quantile(neigh$average_price), digits=3)
+colours <- grey((length(brks):2)/length(brks))
+plot(neigh, col=colours[findInterval(neigh$average_price, brks, all.inside=TRUE)])
+title(main="Airbnb prices by neighbourhood")
+```
+
+As it can be seen, it seems there is spatial autocorrelation of prices with a criterion centre-periphery. To test it, we can use the Moran's I test for each spatial weights matrix, with three different approaches, with randomisation, without and with bootstrap.
+
+#### Spatial Weights Matrix with KNN = 1
+
+```{r}
+moran.test(neigh$average_price, knn1.listw, randomisation=FALSE)
+```
+```{r}
+moran.test(neigh$average_price, knn1.listw, randomisation=TRUE)
+```
+```{r}
+moran.mc(neigh$average_price, knn1.listw, nsim=999)
+```
+
+The results of the three tests are more or less the same, with a Moran's I Index of about *0.4149*, which confirm the evidence of positive spatial autocorrelation. Moreover, the p-value in the three tests is *quite low*, with a strong evidence of rejecting the null hypothesis of 'no spatial autocorrelation'. This results hold in all the three cases, assuming normality, with a random approach and with the bootstrap technique.
+
+#### Spatial Weights Matrix with Contiguity-based approach
+
+```{r}
+moran.test(neigh$average_price, contnb_q.listw, randomisation=FALSE)
+```
+```{r}
+moran.test(neigh$average_price, contnb_q.listw, randomisation=TRUE)
+```
+```{r}
+moran.mc(neigh$average_price, contnb_q.listw, nsim=999)
+```
+
+The results of the three tests are more or less the same, with a Moran's I Index of about *0.399*, which confirm the evidence of positive spatial autocorrelation. Moreover, the p-value in the three tests is *very low*, with a strong evidence of rejecting the null hypothesis of 'no spatial autocorrelation'. This results hold in all the three cases, assuming normality, with a random approach and with the bootstrap technique.
+
+#### Spatial Weights Matrix with Cut-off approach
+
+- Cut-off = 1.8km:
+
+```{r}
+moran.test(neigh$average_price, dnb18.listw, randomisation=FALSE)
+```
+```{r}
+moran.test(neigh$average_price, dnb18.listw, randomisation=TRUE)
+```
+```{r}
+moran.mc(neigh$average_price, dnb18.listw, nsim=999)
+```
+
+The results of the three tests are more or less the same, with a Moran's I Index of about *0.43*, which confirm the evidence of positive spatial autocorrelation. Moreover, the p-value in the three tests is *very low*, with a strong evidence of rejecting the null hypothesis of 'no spatial autocorrelation'. This results hold in all the three cases, assuming normality, with a random approach and with the bootstrap technique.
+
+- Cut-off = 2.5km:
+
+```{r}
+moran.test(neigh$average_price, dnb25.listw, randomisation=FALSE)
+```
+```{r}
+moran.test(neigh$average_price, dnb25.listw, randomisation=TRUE)
+```
+```{r}
+moran.mc(neigh$average_price, dnb25.listw, nsim=999)
+```
+
+The results of the three tests are more or less the same, with a Moran's I Index of about *0.3859*, which confirm the evidence of positive spatial autocorrelation. Moreover, the p-value in the three tests is *very low*, with a strong evidence of rejecting the null hypothesis of 'no spatial autocorrelation'. This results hold in all the three cases, assuming normality, with a random approach and with the bootstrap technique.
+
+- Cut-off = 3.2km:
+
+```{r}
+moran.test(neigh$average_price, dnb32.listw, randomisation=FALSE)
+```
+```{r}
+moran.test(neigh$average_price, dnb32.listw, randomisation=TRUE)
+```
+```{r}
+moran.mc(neigh$average_price, dnb32.listw, nsim=999)
+```
+
+The results of the three tests are more or less the same, with a Moran's I Index of about *0.33*, which confirm the evidence of positive spatial autocorrelation. Moreover, the p-value in the three tests is *very low*, with a strong evidence of rejecting the null hypothesis of 'no spatial autocorrelation'. This results hold in all the three cases, assuming normality, with a random approach and with the bootstrap technique.
+
+### Moran Scatterplot and Neighbourhood with the highest influence
+
+To double-check the spatial autocorrelation and to see which neighbourhoods contibutes more to the spatial autocorrelation we can plot the Moran Scatterplot. 
+
+We will check it with three spatial weights matrices:
+
+* KNN == 1
+* contiguity-based neighbourhood
+* cut-off = 2.5 km
+
+The steps are:
+
+* plot the Moran scatterplot
+* identify the influential neighbourhoods
+* compute and compare the spatially lagged values of the variable of interest
+* map the neighbourhood more influential
+
+#### KNN = 1
+
+Plot the Moran Scatterplot:
+
+```{r}
+mplotknn <- moran.plot(neigh$average_price, listw=knn1.listw, main="Moran scatterplot with KNN", return_df=F)
+grid()
+```
+
+Check the neighbourhood with contribute more to the spatial autocorrelation:
+
+```{r}
+#identify influential neighbourhood
+hotspot1 <- as.numeric(row.names(as.data.frame(summary(mplotknn))))
+
+#compute spatially lagged values
+neigh$wx <- lag.listw(knn1.listw, neigh$average_price)
+
+#assign each influential neighbourhood to the proper Moran scatterplot quadrant
+neigh$quadrant1 <- rep("None", length(neigh$average_price))
+for(i in 1:length(hotspot1))  {
+  if (neigh$average_price[hotspot1[i]]>mean(neigh$average_price) & neigh$wx[hotspot1[i]]> mean(neigh$wx)) 
+        neigh$quadrant1[hotspot1[i]] <- "HH" 
+  if (neigh$average_price[hotspot1[i]]>mean(neigh$average_price) & neigh$wx[hotspot1[i]]< mean(neigh$wx)) 
+        neigh$quadrant1[hotspot1[i]] <- "HL" 
+  if (neigh$average_price[hotspot1[i]]<mean(neigh$average_price) & neigh$wx[hotspot1[i]]<mean(neigh$wx)) 
+        neigh$quadrant1[hotspot1[i]] <- "LL" 
+  if (neigh$average_price[hotspot1[i]]<mean(neigh$average_price) & neigh$wx[hotspot1[i]]>mean(neigh$wx)) 
+        neigh$quadrant1[hotspot1[i]] <- "LH" 
+  }
+table(neigh$quadrant1)
+
+#plot the map of the neighbourhoods with influence by typing
+neigh$colours[neigh$quadrant1=="None"] <- "white" 
+neigh$colours[neigh$quadrant1=="HH"] <- "black" 
+neigh$colours[neigh$quadrant1=="LL"] <- gray(0.9) 
+neigh$colours[neigh$quadrant1=="LH"] <- gray(0.4)
+neigh$colours[neigh$quadrant1=="HL"] <- gray(0.7)
+plot(neigh, col=neigh$colours)
+legend(x=-10, y=73, legend=c("None", "Low-Low", "High-Low", "Low-High", "High-High"),
+                      fill=c("white", gray(0.9), gray(0.7), gray(0.4),
+                      "black"), bty="n", cex=0.8)
+title(main="Neighbourhood with influence - KNN")
+```
+
+#### Contiguity-based Neighbourhood
+
+```{r}
+mplotcont <- moran.plot(neigh$average_price, listw=contnb_q.listw, main="Moran scatterplot with contiguity-based approach", return_df=F)
+grid()
+```
+
+Check the neighbourhood with contribute more to the spatial autocorrelation:
+
+```{r}
+#identify influential neighbourhood
+hotspot2 <- as.numeric(row.names(as.data.frame(summary(mplotcont))))
+
+#compute spatially lagged values
+neigh$wx <- lag.listw(contnb_q.listw, neigh$average_price)
+
+#assign each influential neighbourhood to the proper Moran scatterplot quadrant
+neigh$quadrant2 <- rep("None", length(neigh$average_price))
+for(i in 1:length(hotspot2))  {
+  if (neigh$average_price[hotspot2[i]]>mean(neigh$average_price) & neigh$wx[hotspot2[i]]> mean(neigh$wx)) 
+        neigh$quadrant2[hotspot2[i]] <- "HH" 
+  if (neigh$average_price[hotspot2[i]]>mean(neigh$average_price) & neigh$wx[hotspot2[i]]< mean(neigh$wx)) 
+        neigh$quadrant2[hotspot2[i]] <- "HL" 
+  if (neigh$average_price[hotspot2[i]]<mean(neigh$average_price) & neigh$wx[hotspot2[i]]<mean(neigh$wx)) 
+        neigh$quadrant2[hotspot2[i]] <- "LL" 
+  if (neigh$average_price[hotspot2[i]]<mean(neigh$average_price) & neigh$wx[hotspot2[i]]>mean(neigh$wx)) 
+        neigh$quadrant2[hotspot2[i]] <- "LH" 
+  }
+table(neigh$quadrant2)
+
+#plot the map of the neighbourhoods with influence by typing
+neigh$colours[neigh$quadrant2=="None"] <- "white" 
+neigh$colours[neigh$quadrant2=="HH"] <- "black" 
+neigh$colours[neigh$quadrant2=="LL"] <- gray(0.9) 
+neigh$colours[neigh$quadrant2=="LH"] <- gray(0.4)
+neigh$colours[neigh$quadrant2=="HL"] <- gray(0.7)
+plot(neigh, col=neigh$colours)
+legend(x=-10, y=73, legend=c("None", "Low-Low", "High-Low", "Low-High", "High-High"),
+                      fill=c("white", gray(0.9), gray(0.7), gray(0.4),
+                      "black"), bty="n", cex=0.8)
+title(main="Neighbourhood with influence - Contiguity-based")
+```
+
+
+#### Cut-off = 2.5km
+
+```{r}
+mplotcut <- moran.plot(neigh$average_price, listw=dnb25.listw, main="Moran scatterplot with cut-off 2.5km", return_df=F)
+grid()
+```
+
+```{r}
+#identify influential neighbourhood
+hotspot3 <- as.numeric(row.names(as.data.frame(summary(mplotcut))))
+
+#compute spatially lagged values
+neigh$wx <- lag.listw(dnb25.listw, neigh$average_price)
+
+#assign each influential neighbourhood to the proper Moran scatterplot quadrant
+neigh$quadrant3 <- rep("None", length(neigh$average_price))
+for(i in 1:length(hotspot3))  {
+  if (neigh$average_price[hotspot3[i]]>mean(neigh$average_price) & neigh$wx[hotspot3[i]]> mean(neigh$wx)) 
+        neigh$quadrant3[hotspot3[i]] <- "HH" 
+  if (neigh$average_price[hotspot3[i]]>mean(neigh$average_price) & neigh$wx[hotspot3[i]]< mean(neigh$wx)) 
+        neigh$quadrant3[hotspot3[i]] <- "HL" 
+  if (neigh$average_price[hotspot3[i]]<mean(neigh$average_price) & neigh$wx[hotspot3[i]]<mean(neigh$wx)) 
+        neigh$quadrant3[hotspot3[i]] <- "LL" 
+  if (neigh$average_price[hotspot3[i]]<mean(neigh$average_price) & neigh$wx[hotspot3[i]]>mean(neigh$wx)) 
+        neigh$quadrant3[hotspot3[i]] <- "LH" 
+  }
+table(neigh$quadrant3)
+
+#plot the map of the neighbourhoods with influence by typing
+neigh$colours[neigh$quadrant3=="None"] <- "white" 
+neigh$colours[neigh$quadrant3=="HH"] <- "black" 
+neigh$colours[neigh$quadrant3=="LL"] <- gray(0.9) 
+neigh$colours[neigh$quadrant3=="LH"] <- gray(0.4)
+neigh$colours[neigh$quadrant3=="HL"] <- gray(0.7)
+plot(neigh, col=neigh$colours)
+legend(x=-10, y=73, legend=c("None", "Low-Low", "High-Low", "Low-High", "High-High"),
+                      fill=c("white", gray(0.9), gray(0.7), gray(0.4),
+                      "black"), bty="n", cex=0.8)
+title(main="Neighbourhood with influence - cut-off")
+```
+
+#### Moran Scatterplot Results
+
+In all the three analysis of the Moran Scatterplot, the linear regressions have positive slopes. This confirm the evidence that there exists spatial autocorrelation of prices. Moreover, the maps show that the neighbourhoods near the city centre (in particular 9, 13, 40, 48) have a great influence on the regression and the spatial autocorrelation. 
+
+### Local Moran's I test
+
+However, the Moran Scatterplot does not provide the statistical significance of the results. 
+
+To assess the statistical significance of the Local spatial autocorrelation, we have to use the function *localmoran()*. 
+
+This step will be performed to the same three spatial weights matrices used before and the steps are:
+
+* compute the local Moran'I test to the spatial weights matrices
+* plot the Moran's I index in a map
+* plot the p-value in a map to assess if there are clusters of spatial autocorrelation 
+
+#### KNN = 1
+
+```{r}
+#compute the Moran's I
+lmI <- localmoran(neigh$average_price, knn1.listw)
+head(lmI)
+
+#plot the Moran's I by neighbourhood
+brks <- sort(as.numeric(lmI[,1]))
+colours <- grey((0:length(lmI[,1]))/length(lmI[,1]))
+plot(neigh, col=colours[findInterval(lmI[,1], brks, all.inside=TRUE)])
+title(main="Local Moran's I values")
+
+#assign colours to p-values
+pval <- as.numeric(lmI[,5])
+neigh$colpval[pval>0.05] <- "white" 
+neigh$colpval[pval<=0.05 & pval>0.01] <- gray(0.9) 
+neigh$colpval[pval<=0.01 & pval>0.001] <- gray(0.7)
+neigh$colpval[pval<=0.001 & pval>0.0001] <- gray(0.4)
+neigh$colpval[pval<=0.0001] <- "black"
+
+#plot p-values to check statistical significance
+plot(neigh, col=neigh$colpval)
+title(main="Local Moran's I significance map - KNN")
+legend(x=-10, y=73, legend=c("Not significant", 
+       "p-value = 0.05", "p-value = 0.01", "p-value = 0.001", 
+       "p-value = 0.0001"), fill=c("white", gray(0.9), gray(0.7),    
+       gray(0.4), "black"), bty="n", cex=0.8)
+```
+
+
+#### Contiguity-based Neighbourhood
+
+```{r}
+#compute the Moran's I
+lmI <- localmoran(neigh$average_price, contnb_q.listw)
+head(lmI)
+
+#plot the Moran's I by neighbourhood
+brks <- sort(as.numeric(lmI[,1]))
+colours <- grey((0:length(lmI[,1]))/length(lmI[,1]))
+plot(neigh, col=colours[findInterval(lmI[,1], brks, all.inside=TRUE)])
+title(main="Local Moran's I values")
+
+#assign colours to p-values
+pval <- as.numeric(lmI[,5])
+neigh$colpval[pval>0.05] <- "white" 
+neigh$colpval[pval<=0.05 & pval>0.01] <- gray(0.9) 
+neigh$colpval[pval<=0.01 & pval>0.001] <- gray(0.7)
+neigh$colpval[pval<=0.001 & pval>0.0001] <- gray(0.4)
+neigh$colpval[pval<=0.0001] <- "black"
+
+#plot p-values to check statistical significance
+plot(neigh, col=neigh$colpval)
+title(main="Local Moran's I significance map - Contiguity-based")
+legend(x=-10, y=73, legend=c("Not significant", 
+       "p-value = 0.05", "p-value = 0.01", "p-value = 0.001", 
+       "p-value = 0.0001"), fill=c("white", gray(0.9), gray(0.7),    
+       gray(0.4), "black"), bty="n", cex=0.8)
+```
+
+#### Cut-off = 2.5km
+
+```{r}
+#compute the Moran's I
+lmI <- localmoran(neigh$average_price, dnb25.listw)
+head(lmI)
+
+
+#plot the Moran's I by neighbourhood
+brks <- sort(as.numeric(lmI[,1]))
+colours <- grey((0:length(lmI[,1]))/length(lmI[,1]))
+plot(neigh, col=colours[findInterval(lmI[,1], brks, all.inside=TRUE)])
+title(main="Local Moran's I values")
+
+
+#assign colours to p-values
+pval <- as.numeric(lmI[,5])
+neigh$colpval[pval>0.05] <- "white" 
+neigh$colpval[pval<=0.05 & pval>0.01] <- gray(0.9) 
+neigh$colpval[pval<=0.01 & pval>0.001] <- gray(0.7)
+neigh$colpval[pval<=0.001 & pval>0.0001] <- gray(0.4)
+neigh$colpval[pval<=0.0001] <- "black"
+
+#plot p-values to check statistical significance
+plot(neigh, col=neigh$colpval)
+title(main="Local Moran's I significance map - Cut-off")
+legend(x=-10, y=73, legend=c("Not significant", 
+       "p-value = 0.05", "p-value = 0.01", "p-value = 0.001", 
+       "p-value = 0.0001"), fill=c("white", gray(0.9), gray(0.7),    
+       gray(0.4), "black"), bty="n", cex=0.8)
+```
+
+#### Results
+
+It is evident that there is a strong evidence of spatial autocorrelation of prices, in the neighbouroods of the city center, even if with the KNN approach p-values are not so significant. In the last two approaches, with the contiguity-based and the cut-off equal to 2.5km, the city center seems to be a cluster of spatial autocorrelation. 
+
+
+### Conclusions
+
+To conclude the analysis of the spatial autocorrelation of prices of Airbnb in Milan, it is fundamental to sum up what we have found.
+
+There is evidence of spatial autocorrelation of Airbnb prices. This has been proved building spatial weights matrices in different ways: k-nearest neighbour, cut-off neighbourhood criterion and with a contiguity-based neighbourhood approach. Inevitably, this leads to a robustness of the analysis. 
+
+Moreover, the results have been confirmed plotting the Moran Scatterplots of three of the spatial weights matrices. The plots show a positive spatial autocorrelation and highlight the neighbourhood that influence more in the regression, which are those near the city center. In fact, as seen in the final plots of the p-values, neighbourhoods in the city center contribute more and create a cluster of local spatial autocorrelation. 
+
